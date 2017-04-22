@@ -1,6 +1,11 @@
 require 'rfm69/version'
 require 'rfm69/registers'
+require 'rfm69/settings'
 require 'spi'
+
+# TODOs
+# We might want to break this down into more managable files
+# Convert the setters into functions wth optional argunments so we can make setup more dsl like ?
 
 class RFM69
   class RFM69Exception < Exception; end
@@ -21,8 +26,15 @@ class RFM69
     @bitrate=bitrate
     @deviation=deviation
     #@mode=0
-    #@power=0
+    @power=power
   end
+
+  # The standard form in most of the setter routines is:
+  #   1. Check permitted ranges and raise an exception if out of range
+  #   2. Convert the human readable value into a value suitable for the RFM69 (based on datasheet)
+  #   3. Split that value into seperate bytes
+  #   4. Send the values over SPI.
+  #   5. Update the instance variable (do we need to keep these)
 
   ## FREQUENCY
   def frequency
@@ -37,8 +49,6 @@ class RFM69
     # 890 -> 1020 (915MHz Module)
   def frequency=(freq)
     raise RFM69BadVaue, "Frequency Out of Range" unless freq.between?(290e6,340e6) or freq.between?(424e6,510e6) or freq.between?(862e6,1020e6)
-
-    # Determine the value to put in the registers
     freg = (freq / FSTEP).round
 
     # Split into seperate bytes
@@ -60,10 +70,11 @@ class RFM69
   end
   def bitrate=(bitrate)
     br = (FXOSC / bitrate).round
-    @spi.xfer(txdata: [Registers::BITRATE_MSB | Registers::WRITE_MASK, (br>>8 & 0xff)])[1]
-    @spi.xfer(txdata: [Registers::BITRATE_LSB | Registers::WRITE_MASK, (br    & 0xff)])[1]
-    #puts "Writing #{(br>>8 & 0xff).to_s(16)} to #{(Registers::BITRATE_MSB | Registers::WRITE_MASK).to_s(16)}"
-    #puts "Writing #{(br    & 0xff).to_s(16)} to #{(Registers::BITRATE_LSB | Registers::WRITE_MASK).to_s(16)}"
+    msb=(br>>8  & 0xff)
+    lsb=(br     & 0xff)
+    puts "Setting Bitrate #{bitrate} [#{msb.to_s(16)}, #{lsb.to_s(16)}]"
+    @spi.xfer(txdata: [Registers::BITRATE_MSB | Registers::WRITE_MASK, msb, lsb])
+    @bitrate=bitrate
   end
 
   ## Deviation
@@ -73,30 +84,66 @@ class RFM69
   end
   def deviation=(deviation)
     fdev = (deviation / FSTEP).round
-    #puts "Writing #{(fdev>>8 & 0xff).to_s(16)} to #{(Registers::FDEV_MSB | Registers::WRITE_MASK).to_s(16)}"
-    #puts "Writing #{(fdev    & 0xff).to_s(16)} to #{(Registers::FDEV_LSB | Registers::WRITE_MASK).to_s(16)}"
-    @spi.xfer(txdata: [Registers::FDEV_MSB | Registers::WRITE_MASK, (fdev>>8 & 0xff)])[1]
-    @spi.xfer(txdata: [Registers::FDEV_LSB | Registers::WRITE_MASK, (fdev    & 0xff)])[1]
+    msb=(fdev>>8  & 0xff)
+    lsb=(fdev     & 0xff)
+    puts "Setting Frequency Deviation #{deviation} [#{msb.to_s(16)}, #{lsb.to_s(16)}]"
+    @spi.xfer(txdata: [Registers::FDEV_MSB | Registers::WRITE_MASK, msb, lsb])
+    @deviation=deviation
   end
 
+  # MODE
   def mode
+=begin
+void rfm69::setMode(uint8_t mode){
+  write(RFM69_REG_01_OPMODE, (read(RFM69_REG_01_OPMODE) & 0xE3) | mode);
+  _mode=mode;
+
+  if (mode == RFM69_MODE_TX){
+    while(!(read(RFM69_REG_27_IRQ_FLAGS1) & RF_IRQFLAGS1_TXREADY)) { };
+  }
+}
+=end
   end
   def mode=(mode)
   end
 
   def power
+    pa_level=@spi.xfer(txdata: [Registers::PA_LEVEL, 0])[1]
+    case (pa_level & Values::PA::PA_BITS)
+    when Values::PA::PA0
+      @power=-18 + (pa_level & Values::PA::PWR_BITS)
+    when Values::PA::PA1
+      @power=-18 + (pa_level & Values::PA::PWR_BITS)
+    when Values::PA::PA1 | Values::PA::PA2
+      # TODO Test for HighPower Mode
+      @power=-14 + (pa_level & Values::PA::PWR_BITS)
+    else
+      @power=nil
+      raise RFM69BadVaue, "PA_LEVEL Registered returned 0x#{pa_level.to_s(16)} which is not valid"
+    end
+    @power
   end
   def power=(power)
     raise RFM69BadVaue, "Power level of #{power} is outside allowed range" unless power.between?(-18,20)
-    # -18 -> +13dBm for RFM69 PA0 only
-    # -18 -> +20dBm for RFM69H
+    # TODO Set other required Registers
+    case power
+    when -18..13      # PA0 (RFM69 / RFM69H)
+      # PA0
+      pa_level=Values::PA::PA0 | power + 18
+    when -2..13       # PA1 (RFM69H)
+      pa_level=Values::PA::PA1 | power + 18
+    when 2..17        # PA1 + PA2 (RFM69H)
+      pa_level=Values::PA::PA1 | Values::PA::PA2 | power + 14
+    when 5..20        # PA1 + PA2 + High power (RFM69H)
+      raise RFM69BadValue, "High power mode not currently supported"
+      #pa_level=Values::PA::PA1 | Values::PA::PA2 | power + 11
+    else
+      raise RFM69BadVaue, "Power level of #{power} is outside allowed range"
+    end
+    puts "Setting power level of #{power}: pa_level=0x#{pa_level.to_s(16)}"
 
-    # RFM69H
-    # Pa0 Pa1 Pa2
-    # 1   0   0     RFM69 -18 -> +13    
-    # 0   1   0     RFM69H -2 -> 13
-    # 0   1   1     RFM69H +2 -> +17
-    # 0   1   1     RFM69H +5 -> +20 
+    @spi.xfer(txdata: [Registers::PA_LEVEL | Registers::WRITE_MASK, pa_level])
+    @power=power
   end
 
   def version
@@ -107,6 +154,29 @@ class RFM69
   end
 
   def temperature
+=begin
+float rfm69::readTemp() {
+  // Set mode into Standby (required for temperature measurement)
+  uint8_t oldMode = _mode;
+  setMode(RFM69_MODE_STDBY);
+
+  // Trigger Temperature Measurement
+  write(RFM69_REG_4E_TEMP1, RF_TEMP1_MEAS_START);
+
+  // Wait for reading to be ready
+  while (read(RFM69_REG_4E_TEMP1) & RF_TEMP1_MEAS_RUNNING);
+
+  // Read raw ADC value
+  uint8_t rawTemp = read(RFM69_REG_4F_TEMP2);
+
+  // Set transceiver back to original mode
+  setMode(oldMode);
+
+  // Return processed temperature value
+  //return 168.3-float(rawTemp);
+  return float(rawTemp) - 90.0;
+}
+=end
   end
 
   def read(register)
