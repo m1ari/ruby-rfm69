@@ -6,12 +6,7 @@ class RFM69
   class RFM69Exception < Exception; end
   class RFM69BadValue < RFM69Exception; end
 
-  #attr_reader :frequency
-  attr_reader :mode
-  attr_reader :power
   attr_reader :spi
-  #attr_reader :bitrate
-  #attr_reader :fdev
 
   FXOSC=32e6         # Crystal oscillator frequency (Datasheet P12)
   FSTEP=FXOSC/2**19  # The Datasheet uses 61.0, it's really got more decimal places and that makes a difference
@@ -19,23 +14,20 @@ class RFM69
   def initialize(args={})
     raise RFM69Exception, "You need to specify the device" if args[:device].nil?
 
-    @frequency=frequency
-    @mode=0
-    @power=0
     @spi=SPI.new(device: args[:device])
 
     @spi.speed=500000
+    @frequency=frequency
+    @bitrate=bitrate
+    @deviation=deviation
+    #@mode=0
+    #@power=0
   end
 
   ## FREQUENCY
   def frequency
-    #msb=@spi.xfer(txdata: [Registers::FRF_MSB, 0])[1]
-    #mid=@spi.xfer(txdata: [Registers::FRF_MID, 0])[1]
-    #lsb=@spi.xfer(txdata: [Registers::FRF_LSB, 0])[1]
-    regs=@spi.xfer(txdata: [Registers::FRF_MSB, 0,0,0]
+    regs=@spi.xfer(txdata: [Registers::FRF_MSB, 0,0,0])
     @frequency=(regs[1]<<16 | regs[2]<<8 | regs[3]) * FSTEP
-    puts "Frequency #{@frequency} (#{@frequency.round.to_s(16)}) [#{msb}, #{mid}, #{lsb}]"
-    puts "Frequency #{@frequency} (#{@frequency.round.to_s(16)}) [#{msb.to_s(16)}, #{mid.to_s(16)}, #{lsb.to_s(16)}]"
   end
 
   # For 869.5MHz we should get 0xD96012 for Registers 07, 08, 09
@@ -45,7 +37,6 @@ class RFM69
     # 890 -> 1020 (915MHz Module)
   def frequency=(freq)
     raise RFM69BadVaue, "Frequency Out of Range" unless freq.between?(290e6,340e6) or freq.between?(424e6,510e6) or freq.between?(862e6,1020e6)
-
 
     # Determine the value to put in the registers
     freg = (freq / FSTEP).round
@@ -59,12 +50,13 @@ class RFM69
     @spi.xfer(txdata: [Registers::FRF_MSB | Registers::WRITE_MASK, msb, mid, lsb])
 
     @frequency=freq
-    
   end
 
 
   ## BitRate
   def bitrate
+    regs=@spi.xfer(txdata: [Registers::BITRATE_MSB, 0,0])
+    @bitrate=FXOSC / (regs[1]<<8 | regs[2])
   end
   def bitrate=(bitrate)
     br = (FXOSC / bitrate).round
@@ -74,6 +66,11 @@ class RFM69
     #puts "Writing #{(br    & 0xff).to_s(16)} to #{(Registers::BITRATE_LSB | Registers::WRITE_MASK).to_s(16)}"
   end
 
+  ## Deviation
+  def deviation
+    regs=@spi.xfer(txdata: [Registers::FDEV_MSB, 0,0])
+    @deviation=(regs[1]<<8 | regs[2]) * FSTEP
+  end
   def deviation=(deviation)
     fdev = (deviation / FSTEP).round
     #puts "Writing #{(fdev>>8 & 0xff).to_s(16)} to #{(Registers::FDEV_MSB | Registers::WRITE_MASK).to_s(16)}"
@@ -81,10 +78,14 @@ class RFM69
     @spi.xfer(txdata: [Registers::FDEV_MSB | Registers::WRITE_MASK, (fdev>>8 & 0xff)])[1]
     @spi.xfer(txdata: [Registers::FDEV_LSB | Registers::WRITE_MASK, (fdev    & 0xff)])[1]
   end
-    
+
+  def mode
+  end
   def mode=(mode)
   end
 
+  def power
+  end
   def power=(power)
     raise RFM69BadVaue, "Power level of #{power} is outside allowed range" unless power.between?(-18,20)
     # -18 -> +13dBm for RFM69 PA0 only
